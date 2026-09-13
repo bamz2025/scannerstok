@@ -1,1 +1,292 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scan QR Barang Keluar</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 16px;
+    }
+    .container {
+      max-width: 420px;
+      margin: 0 auto;
+      background: #1e293b;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+    }
+    .header {
+      background: linear-gradient(135deg, #7c3aed, #5b21b6);
+      padding: 20px;
+      text-align: center;
+    }
+    .header h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    .header p { font-size: 0.85rem; opacity: 0.9; }
+    .content { padding: 20px; }
+    #reader {
+      width: 100%;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #000;
+    }
+    .result-box {
+      margin-top: 16px;
+      padding: 14px;
+      background: #0f172a;
+      border-radius: 10px;
+      border: 1px solid #334155;
+      display: none;
+    }
+    .result-box.show { display: block; }
+    .result-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px dashed #334155;
+      font-size: 0.9rem;
+    }
+    .result-row:last-child { border-bottom: none; }
+    .label { color: #94a3b8; }
+    .value { font-weight: 600; text-align: right; max-width: 60%; word-break: break-word; }
+    .btn {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 12px;
+    }
+    .btn-confirm {
+      background: #16a34a;
+      color: white;
+    }
+    .btn-confirm:disabled {
+      background: #64748b;
+      cursor: not-allowed;
+    }
+    .btn-close {
+      background: #dc2626;
+      color: white;
+    }
+    .status {
+      text-align: center;
+      margin-top: 12px;
+      font-size: 0.9rem;
+      padding: 10px;
+      border-radius: 8px;
+    }
+    .form-group {
+      margin-top: 12px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 0.85rem;
+      color: #94a3b8;
+      margin-bottom: 4px;
+    }
+    .form-group input, .form-group select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Scan QR Barang Keluar</h1>
+      <p>Arahkan kamera ke QR Code label barang</p>
+    </div>
 
+    <div class="content">
+      <div id="reader"></div>
+
+      <div class="result-box" id="resultBox">
+        <div class="result-row">
+          <span class="label">Nama Barang</span>
+          <span class="value" id="resNama">-</span>
+        </div>
+        <div class="result-row">
+          <span class="label">Kategori</span>
+          <span class="value" id="resKategori">-</span>
+        </div>
+        <div class="result-row">
+          <span class="label">Tgl Masuk</span>
+          <span class="value" id="resMasuk">-</span>
+        </div>
+        <div class="result-row">
+          <span class="label">Tgl Kadaluarsa</span>
+          <span class="value" id="resExp">-</span>
+        </div>
+
+        <div class="form-group">
+          <label>Jumlah Keluar</label>
+          <input type="number" id="jumlahKeluar" value="1" min="1">
+        </div>
+        <div class="form-group">
+          <label>Tujuan</label>
+          <input type="text" id="tujuan" value="Scan QR" placeholder="Contoh: Lab, IGD, dll">
+        </div>
+        <div class="form-group">
+          <label>Periode</label>
+          <select id="periode">
+            <option value="TW 1">TW 1</option>
+            <option value="TW 2">TW 2</option>
+            <option value="TW 3">TW 3</option>
+            <option value="TW 4">TW 4</option>
+          </select>
+        </div>
+
+        <button class="btn btn-confirm" id="btnConfirm" onclick="konfirmasiKeluar()">
+          Konfirmasi & Catat Keluar
+        </button>
+      </div>
+
+      <div class="status" id="status">Menunggu kamera...</div>
+
+      <button class="btn btn-close" onclick="window.close()">Tutup</button>
+    </div>
+  </div>
+
+  <script>
+    // URL Web App Apps Script Anda (ganti dengan URL deploy Anda)
+    // Harus berakhiran /exec
+    var GAS_WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbXXXXX/exec';
+
+    var scannedData = null;
+    var html5QrCode = null;
+
+    function updateStatus(msg, color) {
+      var el = document.getElementById('status');
+      el.textContent = msg;
+      el.style.background = color + '22';
+      el.style.color = color;
+    }
+
+    function onScanSuccess(decodedText) {
+      // Format QR dari printer: Nama|Kategori|TglMasuk|TglExp
+      var parts = decodedText.split('|');
+      if (parts.length < 2) {
+        updateStatus('Format QR tidak dikenali', '#ef4444');
+        return;
+      }
+
+      scannedData = {
+        nama: (parts[0] || '').trim(),
+        kategori: (parts[1] || '').trim(),
+        tglMasuk: (parts[2] || '').trim(),
+        tglExp: (parts[3] || '').trim()
+      };
+
+      document.getElementById('resNama').textContent = scannedData.nama || '-';
+      document.getElementById('resKategori').textContent = scannedData.kategori || '-';
+      document.getElementById('resMasuk').textContent = scannedData.tglMasuk || '-';
+      document.getElementById('resExp').textContent = scannedData.tglExp || '-';
+      document.getElementById('resultBox').classList.add('show');
+      updateStatus('QR berhasil dibaca! Isi jumlah & tujuan lalu konfirmasi.', '#22c55e');
+
+      // Hentikan kamera setelah berhasil
+      if (html5QrCode) {
+        html5QrCode.stop().catch(function(){});
+      }
+    }
+
+    function konfirmasiKeluar() {
+      if (!scannedData || !scannedData.nama) {
+        alert('Belum ada data QR yang discan');
+        return;
+      }
+
+      var jumlah = parseInt(document.getElementById('jumlahKeluar').val || document.getElementById('jumlahKeluar').value) || 1;
+      var tujuan = document.getElementById('tujuan').value.trim() || 'Scan QR';
+      var periode = document.getElementById('periode').value;
+
+      if (jumlah < 1) {
+        alert('Jumlah minimal 1');
+        return;
+      }
+
+      var btn = document.getElementById('btnConfirm');
+      btn.disabled = true;
+      btn.textContent = 'Menyimpan...';
+      updateStatus('Mengirim data ke server...', '#3b82f6');
+
+      // Kirim data ke Apps Script via URL parameter (GET sederhana)
+      // Atau gunakan form POST ke web app
+      var params = new URLSearchParams({
+        action: 'scanKeluar',
+        nama: scannedData.nama,
+        kategori: scannedData.kategori,
+        tglExp: scannedData.tglExp,
+        jumlah: jumlah,
+        tujuan: tujuan,
+        periode: periode
+      });
+
+      // Buka / redirect ke web app agar bisa diproses (atau fetch jika CORS mengizinkan)
+      // Cara paling andal: kirim lewat window.opener jika dibuka dari Apps Script
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage({
+          type: 'QR_SCAN_RESULT',
+          data: {
+            nama: scannedData.nama,
+            kategori: scannedData.kategori,
+            tglExp: scannedData.tglExp,
+            jumlah: jumlah,
+            tujuan: tujuan,
+            periode: periode
+          }
+        }, '*');
+        updateStatus('Data dikirim ke halaman Barang Keluar. Menutup...', '#22c55e');
+        setTimeout(function() { window.close(); }, 800);
+      } else {
+        // Fallback: tampilkan data untuk dicopy / buka web app
+        updateStatus('Buka dari menu Barang Keluar agar data otomatis tersimpan.', '#f59e0b');
+        btn.disabled = false;
+        btn.textContent = 'Konfirmasi & Catat Keluar';
+        alert('Scan berhasil.\n\nNama: ' + scannedData.nama +
+              '\nJumlah: ' + jumlah +
+              '\nTujuan: ' + tujuan +
+              '\n\nSilakan buka scanner ini dari tombol Scan QR di menu Barang Keluar agar data otomatis tercatat.');
+      }
+    }
+
+    // Start kamera
+    window.onload = function() {
+      html5QrCode = new Html5Qrcode("reader");
+      Html5Qrcode.getCameras().then(function(cameras) {
+        if (cameras && cameras.length) {
+          var cameraId = cameras[cameras.length - 1].id; // biasanya kamera belakang di HP
+          html5QrCode.start(
+            cameraId,
+            { fps: 10, qrbox: { width: 250, height: 250 } },
+            onScanSuccess,
+            function() {} // ignore scan fail
+          ).then(function() {
+            updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
+          }).catch(function(err) {
+            updateStatus('Gagal membuka kamera: ' + err, '#ef4444');
+          });
+        } else {
+          updateStatus('Tidak ada kamera terdeteksi', '#ef4444');
+        }
+      }).catch(function(err) {
+        updateStatus('Error akses kamera: ' + err, '#ef4444');
+      });
+    };
+  </script>
+</body>
+</html>
