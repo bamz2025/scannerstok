@@ -2,9 +2,9 @@
 <html lang="id">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
   <title>Scan QR Barang Keluar</title>
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -30,12 +30,21 @@
     .header h1 { font-size: 1.25rem; margin-bottom: 4px; }
     .header p { font-size: 0.85rem; opacity: 0.9; }
     .content { padding: 20px; }
-    #reader {
+    #wrap {
+      position: relative;
       width: 100%;
+      aspect-ratio: 1;
       border-radius: 12px;
       overflow: hidden;
       background: #000;
-      min-height: 220px;
+    }
+    #video, #canvas { width: 100%; height: 100%; object-fit: cover; }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      border: 3px solid #22c55e;
+      border-radius: 12px;
+      pointer-events: none;
     }
     .result-box {
       margin-top: 16px;
@@ -66,22 +75,10 @@
       cursor: pointer;
       margin-top: 12px;
     }
-    .btn-confirm {
-      background: #16a34a;
-      color: white;
-    }
-    .btn-confirm:disabled {
-      background: #64748b;
-      cursor: not-allowed;
-    }
-    .btn-secondary {
-      background: #334155;
-      color: #e2e8f0;
-    }
-    .btn-close {
-      background: #dc2626;
-      color: white;
-    }
+    .btn-confirm { background: #16a34a; color: white; }
+    .btn-confirm:disabled { background: #64748b; cursor: not-allowed; }
+    .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-close { background: #dc2626; color: white; }
     .status {
       text-align: center;
       margin-top: 12px;
@@ -92,9 +89,7 @@
       color: #94a3b8;
     }
     .status.err { white-space: pre-wrap; text-align: left; font-size: 0.8rem; }
-    .form-group {
-      margin-top: 12px;
-    }
+    .form-group { margin-top: 12px; }
     .form-group label {
       display: block;
       font-size: 0.85rem;
@@ -120,25 +115,17 @@
     </div>
 
     <div class="content">
-      <div id="reader"></div>
+      <div id="wrap">
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="canvas" style="display:none"></canvas>
+        <div id="overlay"></div>
+      </div>
 
       <div class="result-box" id="resultBox">
-        <div class="result-row">
-          <span class="label">Nama Barang</span>
-          <span class="value" id="resNama">-</span>
-        </div>
-        <div class="result-row">
-          <span class="label">Kategori</span>
-          <span class="value" id="resKategori">-</span>
-        </div>
-        <div class="result-row">
-          <span class="label">Tgl Masuk</span>
-          <span class="value" id="resMasuk">-</span>
-        </div>
-        <div class="result-row">
-          <span class="label">Tgl Kadaluarsa</span>
-          <span class="value" id="resExp">-</span>
-        </div>
+        <div class="result-row"><span class="label">Nama Barang</span><span class="value" id="resNama">-</span></div>
+        <div class="result-row"><span class="label">Kategori</span><span class="value" id="resKategori">-</span></div>
+        <div class="result-row"><span class="label">Tgl Masuk</span><span class="value" id="resMasuk">-</span></div>
+        <div class="result-row"><span class="label">Tgl Kadaluarsa</span><span class="value" id="resExp">-</span></div>
 
         <div class="form-group">
           <label>Jumlah Keluar</label>
@@ -158,35 +145,96 @@
           </select>
         </div>
 
-        <button class="btn btn-confirm" id="btnConfirm" onclick="konfirmasiKeluar()">
-          Konfirmasi &amp; Catat Keluar
-        </button>
-        <button class="btn btn-secondary" onclick="scanUlang()">
-          Scan Ulang
-        </button>
+        <button class="btn btn-confirm" id="btnConfirm" onclick="konfirmasiKeluar()">Konfirmasi &amp; Catat Keluar</button>
+        <button class="btn btn-secondary" onclick="scanUlang()">Scan Ulang</button>
       </div>
 
-      <div class="status" id="status">Menyiapkan kamera...</div>
+      <p class="status" id="status">Memulai kamera...</p>
 
       <button class="btn btn-close" onclick="window.close()">Tutup</button>
     </div>
   </div>
 
   <script>
-    // URL Web App Apps Script Anda (ganti dengan URL deploy Anda)
-    // Harus berakhiran /exec
-    var GAS_WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbXXXXX/exec';
-
+    var video = document.getElementById('video');
+    var canvas = document.getElementById('canvas');
+    var ctx = canvas.getContext('2d', { willReadFrequently: true });
+    var statusEl = document.getElementById('status');
+    var resultBox = document.getElementById('resultBox');
+    var scanning = true;
+    var currentStream = null;
     var scannedData = null;
-    var html5QrCode = null;
-    var cameraRunning = false;
 
     function updateStatus(msg, color, isError) {
-      var el = document.getElementById('status');
-      el.textContent = msg;
-      el.style.background = color + '22';
-      el.style.color = color;
-      el.classList.toggle('err', !!isError);
+      statusEl.textContent = msg;
+      statusEl.style.background = color + '22';
+      statusEl.style.color = color;
+      statusEl.classList.toggle('err', !!isError);
+    }
+
+    function describeCameraError(err) {
+      var msg = (err && (err.message || err.name)) || String(err);
+      if (/NotAllowedError|Permission/i.test(msg)) {
+        return 'Izin kamera ditolak. Izinkan akses kamera di pengaturan browser/situs, lalu reload halaman.';
+      }
+      if (/NotFoundError/i.test(msg)) {
+        return 'Kamera tidak ditemukan di perangkat ini.';
+      }
+      if (/NotReadableError/i.test(msg)) {
+        return 'Kamera sedang dipakai aplikasi lain. Tutup aplikasi kamera lain lalu coba lagi.';
+      }
+      return msg;
+    }
+
+    function startCamera() {
+      var isSecure = window.isSecureContext ||
+        location.protocol === 'https:' ||
+        location.hostname === 'localhost' ||
+        location.hostname === '127.0.0.1';
+      if (!isSecure) {
+        updateStatus(
+          'Kamera tidak bisa diakses karena halaman ini bukan HTTPS (' + location.protocol + '//' + location.hostname + '). ' +
+          'Buka lewat URL Web App Apps Script (https://...), bukan file lokal.',
+          '#ef4444', true
+        );
+        return;
+      }
+      if (typeof jsQR === 'undefined') {
+        updateStatus('Gagal memuat library jsQR (CDN jsdelivr tidak bisa diakses). Cek koneksi internet perangkat.', '#ef4444', true);
+        return;
+      }
+
+      updateStatus('Meminta izin kamera...', '#3b82f6');
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+        .then(function(stream) {
+          currentStream = stream;
+          video.srcObject = stream;
+          video.onloadedmetadata = function() {
+            video.play();
+            scanning = true;
+            updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
+            requestAnimationFrame(tick);
+          };
+        })
+        .catch(function(err) {
+          updateStatus('Gagal membuka kamera: ' + describeCameraError(err), '#ef4444', true);
+        });
+    }
+
+    function tick() {
+      if (!scanning) return;
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+        if (code && code.data) {
+          onScanSuccess(code.data);
+          return; // berhenti loop, kamera dimatikan di onScanSuccess
+        }
+      }
+      requestAnimationFrame(tick);
     }
 
     function onScanSuccess(decodedText) {
@@ -194,6 +242,7 @@
       var parts = decodedText.split('|');
       if (parts.length < 2) {
         updateStatus('Format QR tidak dikenali: ' + decodedText, '#ef4444', true);
+        requestAnimationFrame(tick); // lanjut scan, mungkin salah target
         return;
       }
 
@@ -208,11 +257,29 @@
       document.getElementById('resKategori').textContent = scannedData.kategori || '-';
       document.getElementById('resMasuk').textContent = scannedData.tglMasuk || '-';
       document.getElementById('resExp').textContent = scannedData.tglExp || '-';
-      document.getElementById('resultBox').classList.add('show');
+      resultBox.classList.add('show');
       updateStatus('QR berhasil dibaca! Isi jumlah & tujuan lalu konfirmasi.', '#22c55e');
 
-      // Hentikan kamera setelah berhasil supaya tidak scan berulang-ulang
+      if (navigator.vibrate) { try { navigator.vibrate(150); } catch (e) {} }
+
       stopCamera();
+    }
+
+    function stopCamera() {
+      scanning = false;
+      if (currentStream) {
+        currentStream.getTracks().forEach(function(t) { t.stop(); });
+        currentStream = null;
+      }
+    }
+
+    function scanUlang() {
+      scannedData = null;
+      resultBox.classList.remove('show');
+      var btn = document.getElementById('btnConfirm');
+      btn.disabled = false;
+      btn.textContent = 'Konfirmasi & Catat Keluar';
+      startCamera();
     }
 
     function konfirmasiKeluar() {
@@ -221,8 +288,7 @@
         return;
       }
 
-      var jumlahInput = document.getElementById('jumlahKeluar');
-      var jumlah = parseInt(jumlahInput.value, 10) || 1;
+      var jumlah = parseInt(document.getElementById('jumlahKeluar').value, 10) || 1;
       var tujuan = document.getElementById('tujuan').value.trim() || 'Scan QR';
       var periode = document.getElementById('periode').value;
 
@@ -245,127 +311,28 @@
         periode: periode
       };
 
-      // Cara paling andal: kirim lewat window.opener jika dibuka dari Apps Script
-      if (window.opener && !window.opener.closed) {
-        window.opener.postMessage({
-          type: 'QR_SCAN_RESULT',
-          data: payload
-        }, '*');
-        updateStatus('Data dikirim ke halaman Barang Keluar. Menutup...', '#22c55e');
-        setTimeout(function() { window.close(); }, 800);
-      } else {
-        // Fallback: tampilkan data untuk dicopy / buka web app
-        updateStatus('Buka dari menu Barang Keluar agar data otomatis tersimpan.', '#f59e0b');
-        btn.disabled = false;
-        btn.textContent = 'Konfirmasi & Catat Keluar';
-        alert('Scan berhasil.\n\nNama: ' + scannedData.nama +
-              '\nJumlah: ' + jumlah +
-              '\nTujuan: ' + tujuan +
-              '\n\nSilakan buka scanner ini dari tombol Scan QR di menu Barang Keluar agar data otomatis tercatat.');
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage({ type: 'QR_SCAN_RESULT', data: payload }, '*');
+          updateStatus('Data dikirim ke halaman Barang Keluar. Menutup...', '#22c55e');
+          setTimeout(function() { window.close(); }, 800);
+          return;
+        }
+      } catch (e) {
+        // window.opener bisa null/terblokir kalau window dibuka dengan 'noopener'
       }
-    }
 
-    function scanUlang() {
-      scannedData = null;
-      document.getElementById('resultBox').classList.remove('show');
-      var btn = document.getElementById('btnConfirm');
+      updateStatus('Buka dari menu Barang Keluar agar data otomatis tersimpan.', '#f59e0b');
       btn.disabled = false;
       btn.textContent = 'Konfirmasi & Catat Keluar';
-      startCamera();
+      alert('Scan berhasil.\n\nNama: ' + scannedData.nama +
+            '\nJumlah: ' + jumlah +
+            '\nTujuan: ' + tujuan +
+            '\n\nSilakan buka scanner ini dari tombol Scan QR di menu Barang Keluar agar data otomatis tercatat.');
     }
 
-    function stopCamera() {
-      if (html5QrCode && cameraRunning) {
-        html5QrCode.stop().then(function() {
-          cameraRunning = false;
-        }).catch(function() {
-          cameraRunning = false;
-        });
-      }
-    }
-
-    function startCamera() {
-      if (typeof Html5Qrcode === 'undefined') {
-        updateStatus(
-          'Gagal memuat library html5-qrcode (CDN unpkg.com tidak bisa diakses). ' +
-          'Cek koneksi internet perangkat atau apakah unpkg.com diblokir jaringan/firewall.',
-          '#ef4444', true
-        );
-        return;
-      }
-
-      // Kamera browser hanya jalan di HTTPS atau localhost (secure context)
-      var isSecure = window.isSecureContext ||
-        location.protocol === 'https:' ||
-        location.hostname === 'localhost' ||
-        location.hostname === '127.0.0.1';
-      if (!isSecure) {
-        updateStatus(
-          'Kamera tidak bisa diakses karena halaman dibuka bukan lewat HTTPS ' +
-          '(saat ini: ' + location.protocol + '//' + location.hostname + '). ' +
-          'Buka halaman ini lewat URL Web App Apps Script (https://script.google.com/...) ' +
-          'atau domain HTTPS lain, bukan file lokal.',
-          '#ef4444', true
-        );
-        return;
-      }
-
-      updateStatus('Meminta izin kamera...', '#3b82f6');
-      html5QrCode = new Html5Qrcode('reader');
-      var config = { fps: 10, qrbox: { width: 250, height: 250 } };
-
-      // Coba langsung minta kamera belakang (facingMode) - ini menghindari
-      // masalah enumerasi kamera yang sering gagal di WebView/Android tanpa
-      // izin kamera yang sudah diberikan sebelumnya.
-      html5QrCode.start({ facingMode: 'environment' }, config, onScanSuccess, function() {})
-        .then(function() {
-          cameraRunning = true;
-          updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
-        })
-        .catch(function(err) {
-          console.warn('facingMode environment gagal, coba enumerasi kamera:', err);
-          // Fallback: enumerasi daftar kamera dan pilih kamera terakhir
-          Html5Qrcode.getCameras().then(function(cameras) {
-            if (!cameras || !cameras.length) {
-              updateStatus('Tidak ada kamera terdeteksi pada perangkat ini.', '#ef4444', true);
-              return;
-            }
-            var cameraId = cameras[cameras.length - 1].id;
-            html5QrCode.start(cameraId, config, onScanSuccess, function() {})
-              .then(function() {
-                cameraRunning = true;
-                updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
-              })
-              .catch(function(err2) {
-                updateStatus('Gagal membuka kamera: ' + describeCameraError(err2), '#ef4444', true);
-              });
-          }).catch(function(err2) {
-            updateStatus('Gagal mengakses daftar kamera: ' + describeCameraError(err2), '#ef4444', true);
-          });
-        });
-    }
-
-    function describeCameraError(err) {
-      var msg = (err && (err.message || err.name || err.toString())) || String(err);
-      if (/NotAllowedError|Permission/i.test(msg)) {
-        return 'Izin kamera ditolak. Buka pengaturan browser/situs dan izinkan akses kamera, lalu reload halaman.';
-      }
-      if (/NotFoundError/i.test(msg)) {
-        return 'Kamera tidak ditemukan di perangkat ini.';
-      }
-      if (/NotReadableError/i.test(msg)) {
-        return 'Kamera sedang dipakai aplikasi lain. Tutup aplikasi kamera lain lalu coba lagi.';
-      }
-      return msg;
-    }
-
-    window.onload = function() {
-      startCamera();
-    };
-
-    window.onbeforeunload = function() {
-      stopCamera();
-    };
+    window.addEventListener('beforeunload', stopCamera);
+    startCamera();
   </script>
 </body>
 </html>
