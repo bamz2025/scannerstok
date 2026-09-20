@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
-  <title>Scan QR Barang Keluar</title>
+  <title>Scan QR Barang Keluar - Ultra Precision</title>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -45,6 +45,21 @@
       border: 3px solid #22c55e;
       border-radius: 12px;
       pointer-events: none;
+      box-shadow: inset 0 0 15px rgba(34, 197, 94, 0.3);
+    }
+    .scan-line {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: #22c55e;
+      box-shadow: 0 0 10px #22c55e, 0 0 20px #22c55e;
+      animation: moveScan 2s infinite linear;
+      pointer-events: none;
+    }
+    @keyframes moveScan {
+      0% { top: 5%; }
+      50% { top: 95%; }
+      100% { top: 5%; }
     }
     .result-box {
       margin-top: 16px;
@@ -78,6 +93,8 @@
     .btn-confirm { background: #16a34a; color: white; }
     .btn-confirm:disabled { background: #64748b; cursor: not-allowed; }
     .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-torch { background: #f59e0b; color: #0f172a; display: none; }
+    .btn-torch.active { background: #fbbf24; }
     .btn-close { background: #dc2626; color: white; }
     .status {
       text-align: center;
@@ -111,14 +128,20 @@
   <div class="container">
     <div class="header">
       <h1>Scan QR Barang Keluar</h1>
-      <p>Arahkan kamera ke QR Code label barang</p>
+      <p>Pindai otomatis (Mendukung Botol &amp; Gelap)</p>
     </div>
     <div class="content">
       <div id="wrap">
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" style="display:none"></canvas>
-        <div id="overlay"></div>
+        <div id="overlay">
+          <div class="scan-line"></div>
+        </div>
       </div>
+
+      <!-- Tombol Senter -->
+      <button class="btn btn-torch" id="btnTorch" onclick="toggleTorch()">🔦 Nyalakan Senter</button>
+
       <div class="result-box" id="resultBox">
         <div class="result-row"><span class="label">Nama Barang</span><span class="value" id="resNama">-</span></div>
         <div class="result-row"><span class="label">Kategori</span><span class="value" id="resKategori">-</span></div>
@@ -148,6 +171,7 @@
       <button class="btn btn-close" onclick="window.close()">Tutup</button>
     </div>
   </div>
+
   <script>
     var video = document.getElementById('video');
     var canvas = document.getElementById('canvas');
@@ -157,36 +181,31 @@
     var scanning = true;
     var currentStream = null;
     var scannedData = null;
+    var torchOn = false;
+    var track = null;
+    var processPass = 0; // Rotasi/pipeline pass counter
 
-    // ================= SUARA BEEP (PC & Android) =================
+    // ================= SUARA BEEP =================
     var audioCtx = null;
-
     function playBeep() {
       try {
         if (!audioCtx) {
           audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         }
-        // Resume jika suspended (kebijakan browser mobile)
         if (audioCtx.state === 'suspended') {
           audioCtx.resume();
         }
-
         var oscillator = audioCtx.createOscillator();
         var gainNode = audioCtx.createGain();
-
         oscillator.connect(gainNode);
         gainNode.connect(audioCtx.destination);
-
-        // Nada beep yang jelas
         oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
         gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
         gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
-
         oscillator.start(audioCtx.currentTime);
         oscillator.stop(audioCtx.currentTime + 0.25);
       } catch (e) {
-        // Fallback diam jika audio tidak didukung
         console.warn('Beep tidak bisa diputar:', e);
       }
     }
@@ -212,6 +231,77 @@
       return msg;
     }
 
+    // ================= ADVANCED IMAGE PROCESSING =================
+    // 1. Adaptive Thresholding & Anti-Glare (Sangat ampuh untuk pantulan cahaya & gelap)
+    function applyAdaptiveThreshold(imageData) {
+      var data = imageData.data;
+      var width = imageData.width;
+      var height = imageData.height;
+      var gray = new Uint8Array(width * height);
+
+      // Konversi ke Grayscale & Tekan Glare (Pantulan Berlebih)
+      for (var i = 0, j = 0; i < data.length; i += 4, j++) {
+        var r = data[i], g = data[i+1], b = data[i+2];
+        
+        // Deteksi Glare (piksel yang terlalu menyala putih karena pantulan)
+        if (r > 235 && g > 235 && b > 235) {
+          gray[j] = 128; // Netralkan area kilau agar kontras tidak hancur
+        } else {
+          gray[j] = (0.299 * r + 0.587 * g + 0.114 * b);
+        }
+      }
+
+      // Local Adaptive Binarization (Mengatasi Gelap / Bayangan Tidak Merata)
+      var blockSize = 15;
+      var halfBlock = Math.floor(blockSize / 2);
+
+      for (var y = 0; y < height; y += 2) { // Sampling lompat 2 piksel untuk kinerja cepat
+        for (var x = 0; x < width; x += 2) {
+          var sum = 0, count = 0;
+
+          // Hitung rata-rata lokal sekitarnya
+          for (var ky = -halfBlock; ky <= halfBlock; ky += 3) {
+            var py = y + ky;
+            if (py < 0 || py >= height) continue;
+            for (var kx = -halfBlock; kx <= halfBlock; kx += 3) {
+              var px = x + kx;
+              if (px < 0 || px >= width) continue;
+              sum += gray[py * width + px];
+              count++;
+            }
+          }
+
+          var localAvg = sum / count;
+          var idx = (y * width + x);
+          var val = gray[idx] < (localAvg - 4) ? 0 : 255;
+
+          var pxIdx = idx * 4;
+          data[pxIdx] = data[pxIdx + 1] = data[pxIdx + 2] = val;
+        }
+      }
+      return imageData;
+    }
+
+    // 2. High Contrast & Auto Gamma Boost (Untuk Ruangan Super Gelap)
+    function applyExtremeLowLightEnhance(imageData) {
+      var data = imageData.data;
+      var len = data.length;
+
+      for (var i = 0; i < len; i += 4) {
+        var r = data[i], g = data[i+1], b = data[i+2];
+        var luma = 0.299 * r + 0.587 * g + 0.114 * b;
+
+        // Apply Power Law (Gamma Correction) & Contrast stretch
+        var enhanced = Math.pow(luma / 255, 0.5) * 255; // Gamma 0.5 menaikkan detail gelap
+        enhanced = ((enhanced - 128) * 1.6) + 128; // Boost Kontras
+
+        enhanced = Math.min(255, Math.max(0, enhanced));
+        data[i] = data[i+1] = data[i+2] = enhanced;
+      }
+      return imageData;
+    }
+
+    // ================= KAMERA =================
     function startCamera() {
       var isSecure = window.isSecureContext ||
         location.protocol === 'https:' ||
@@ -226,34 +316,122 @@
         return;
       }
       if (typeof jsQR === 'undefined') {
-        updateStatus('Gagal memuat library jsQR (CDN jsdelivr tidak bisa diakses). Cek koneksi internet perangkat.', '#ef4444', true);
+        updateStatus('Gagal memuat library jsQR. Cek koneksi internet perangkat.', '#ef4444', true);
         return;
       }
+
       updateStatus('Meminta izin kamera...', '#3b82f6');
-      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+
+      var constraints = {
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { min: 640, ideal: 1280, max: 1920 },
+          height: { min: 480, ideal: 720, max: 1080 },
+          advanced: [
+            { focusMode: 'continuous' },
+            { exposureMode: 'continuous' },
+            { whiteBalanceMode: 'continuous' }
+          ]
+        },
+        audio: false
+      };
+
+      navigator.mediaDevices.getUserMedia(constraints)
         .then(function(stream) {
           currentStream = stream;
           video.srcObject = stream;
+          track = stream.getVideoTracks()[0];
+
+          var capabilities = track.getCapabilities ? track.getCapabilities() : {};
+          if (capabilities.torch) {
+            document.getElementById('btnTorch').style.display = 'block';
+          }
+
           video.onloadedmetadata = function() {
             video.play();
             scanning = true;
-            updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
+            updateStatus('Siap memindai (Botol, Gelap, & Pantulan Cahaya)', '#38bdf8');
             requestAnimationFrame(tick);
           };
         })
         .catch(function(err) {
-          updateStatus('Gagal membuka kamera: ' + describeCameraError(err), '#ef4444', true);
+          navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+            .then(function(stream) {
+              currentStream = stream;
+              video.srcObject = stream;
+              track = stream.getVideoTracks()[0];
+              video.onloadedmetadata = function() {
+                video.play();
+                scanning = true;
+                updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
+                requestAnimationFrame(tick);
+              };
+            })
+            .catch(function(err2) {
+              updateStatus('Gagal membuka kamera: ' + describeCameraError(err2), '#ef4444', true);
+            });
         });
     }
 
+    function toggleTorch() {
+      if (!track) return;
+      torchOn = !torchOn;
+      track.applyConstraints({
+        advanced: [{ torch: torchOn }]
+      }).then(function() {
+        var btn = document.getElementById('btnTorch');
+        if (torchOn) {
+          btn.textContent = '🔦 Matikan Senter';
+          btn.classList.add('active');
+        } else {
+          btn.textContent = '🔦 Nyalakan Senter';
+          btn.classList.remove('active');
+        }
+      }).catch(function(e) {
+        console.warn('Torch tidak didukung:', e);
+        updateStatus('Senter tidak didukung di perangkat ini', '#f59e0b');
+      });
+    }
+
+    // ================= LOOPING PEMINDAIAN MULTI-PASS =================
     function tick() {
       if (!scanning) return;
+
       if (video.readyState === video.HAVE_ENOUGH_DATA) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        
+        // Pass 0 & 1: Normal Crop
+        // Pass 2: Center Zoom Crop (Sangat efektif untuk lengkungan botol)
+        var cropX = 0, cropY = 0, cropW = canvas.width, cropH = canvas.height;
+        
+        processPass = (processPass + 1) % 4;
+
+        if (processPass === 2) {
+          // Crop 60% area tengah untuk menangani kelengkungan botol yang terdistorsi di pinggir
+          cropW = Math.floor(canvas.width * 0.6);
+          cropH = Math.floor(canvas.height * 0.6);
+          cropX = Math.floor((canvas.width - cropW) / 2);
+          cropY = Math.floor((canvas.height - cropH) / 2);
+        }
+
+        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, canvas.width, canvas.height);
         var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+
+        // Pipeline Bergantian untuk Kinerja Maksimal Tanpa Lag
+        if (processPass === 1) {
+          // Terapkan Enhancer Low-Light
+          imageData = applyExtremeLowLightEnhance(imageData);
+        } else if (processPass === 3) {
+          // Terapkan Anti-Glare & Adaptive Thresholding
+          imageData = applyAdaptiveThreshold(imageData);
+        }
+
+        // Panggil jsQR dengan pencarian ganda (Normal & Inverted)
+        var code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'attemptBoth'
+        });
+
         if (code && code.data) {
           onScanSuccess(code.data);
           return;
@@ -272,7 +450,6 @@
         tglExp: ''
       };
 
-      // Format baru
       if (/KATEGORI\s*:/i.test(text) || /NAMA\s*BARANG\s*:/i.test(text)) {
         var lines = text.split(/\r?\n/);
         for (var i = 0; i < lines.length; i++) {
@@ -294,7 +471,6 @@
         return result;
       }
 
-      // Format lama (pipe)
       if (text.indexOf('|') !== -1) {
         var parts = text.split('|');
         result.nama     = (parts[0] || '').trim();
@@ -316,7 +492,6 @@
         return;
       }
 
-      // ===== PUTAR BEEP SAAT BERHASIL =====
       playBeep();
 
       scannedData = {
@@ -334,9 +509,13 @@
       resultBox.classList.add('show');
       updateStatus('QR berhasil dibaca! Isi jumlah & tujuan lalu konfirmasi.', '#22c55e');
 
-      // Getar juga (jika HP mendukung)
       if (navigator.vibrate) {
         try { navigator.vibrate(150); } catch (e) {}
+      }
+
+      if (torchOn && track) {
+        track.applyConstraints({ advanced: [{ torch: false }] }).catch(function(){});
+        torchOn = false;
       }
 
       stopCamera();
@@ -348,6 +527,7 @@
         currentStream.getTracks().forEach(function(t) { t.stop(); });
         currentStream = null;
       }
+      track = null;
     }
 
     function scanUlang() {
@@ -356,6 +536,10 @@
       var btn = document.getElementById('btnConfirm');
       btn.disabled = false;
       btn.textContent = 'Konfirmasi & Catat Keluar';
+      document.getElementById('btnTorch').style.display = 'none';
+      document.getElementById('btnTorch').textContent = '🔦 Nyalakan Senter';
+      document.getElementById('btnTorch').classList.remove('active');
+      torchOn = false;
       startCamera();
     }
 
