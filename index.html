@@ -78,8 +78,6 @@
     .btn-confirm { background: #16a34a; color: white; }
     .btn-confirm:disabled { background: #64748b; cursor: not-allowed; }
     .btn-secondary { background: #334155; color: #e2e8f0; }
-    .btn-torch { background: #f59e0b; color: #0f172a; display: none; }
-    .btn-torch.active { background: #fbbf24; }
     .btn-close { background: #dc2626; color: white; }
     .status {
       text-align: center;
@@ -121,10 +119,6 @@
         <canvas id="canvas" style="display:none"></canvas>
         <div id="overlay"></div>
       </div>
-
-      <!-- Tombol Senter (muncul jika didukung) -->
-      <button class="btn btn-torch" id="btnTorch" onclick="toggleTorch()">🔦 Nyalakan Senter</button>
-
       <div class="result-box" id="resultBox">
         <div class="result-row"><span class="label">Nama Barang</span><span class="value" id="resNama">-</span></div>
         <div class="result-row"><span class="label">Kategori</span><span class="value" id="resKategori">-</span></div>
@@ -163,30 +157,36 @@
     var scanning = true;
     var currentStream = null;
     var scannedData = null;
-    var torchOn = false;
-    var track = null;
 
-    // ================= SUARA BEEP =================
+    // ================= SUARA BEEP (PC & Android) =================
     var audioCtx = null;
+
     function playBeep() {
       try {
         if (!audioCtx) {
           audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         }
+        // Resume jika suspended (kebijakan browser mobile)
         if (audioCtx.state === 'suspended') {
           audioCtx.resume();
         }
+
         var oscillator = audioCtx.createOscillator();
         var gainNode = audioCtx.createGain();
+
         oscillator.connect(gainNode);
         gainNode.connect(audioCtx.destination);
+
+        // Nada beep yang jelas
         oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
         gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
         gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+
         oscillator.start(audioCtx.currentTime);
         oscillator.stop(audioCtx.currentTime + 0.25);
       } catch (e) {
+        // Fallback diam jika audio tidak didukung
         console.warn('Beep tidak bisa diputar:', e);
       }
     }
@@ -212,52 +212,6 @@
       return msg;
     }
 
-    // ================= PREPROCESSING UNTUK CAHAYA GELAP =================
-    function enhanceImageData(imageData) {
-      var data = imageData.data;
-      var len = data.length;
-
-      // 1. Hitung rata-rata brightness
-      var sum = 0;
-      var count = 0;
-      for (var i = 0; i < len; i += 16) { // sampling setiap 4 pixel
-        var r = data[i], g = data[i+1], b = data[i+2];
-        sum += 0.299 * r + 0.587 * g + 0.114 * b;
-        count++;
-      }
-      var avg = sum / count;
-
-      // 2. Tentukan seberapa agresif enhancement
-      // Jika gelap (avg < 90) → boost lebih kuat
-      var brightnessBoost = avg < 70 ? 45 : (avg < 110 ? 30 : 10);
-      var contrast = avg < 80 ? 1.45 : 1.25;
-
-      // 3. Terapkan brightness + contrast
-      for (var i = 0; i < len; i += 4) {
-        var r = data[i];
-        var g = data[i+1];
-        var b = data[i+2];
-
-        // Grayscale dulu (membantu jsQR)
-        var gray = 0.299 * r + 0.587 * g + 0.114 * b;
-
-        // Brightness
-        gray += brightnessBoost;
-
-        // Contrast
-        gray = ((gray - 128) * contrast) + 128;
-
-        // Clamp
-        if (gray < 0) gray = 0;
-        if (gray > 255) gray = 255;
-
-        data[i] = data[i+1] = data[i+2] = gray;
-      }
-
-      return imageData;
-    }
-
-    // ================= KAMERA =================
     function startCamera() {
       var isSecure = window.isSecureContext ||
         location.protocol === 'https:' ||
@@ -272,84 +226,24 @@
         return;
       }
       if (typeof jsQR === 'undefined') {
-        updateStatus('Gagal memuat library jsQR. Cek koneksi internet perangkat.', '#ef4444', true);
+        updateStatus('Gagal memuat library jsQR (CDN jsdelivr tidak bisa diakses). Cek koneksi internet perangkat.', '#ef4444', true);
         return;
       }
-
       updateStatus('Meminta izin kamera...', '#3b82f6');
-
-      // Constraint lebih baik untuk low-light
-      var constraints = {
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          // Beberapa browser mendukung ini
-          advanced: [
-            { focusMode: 'continuous' },
-            { exposureMode: 'continuous' }
-          ]
-        },
-        audio: false
-      };
-
-      navigator.mediaDevices.getUserMedia(constraints)
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
         .then(function(stream) {
           currentStream = stream;
           video.srcObject = stream;
-          track = stream.getVideoTracks()[0];
-
-          // Cek apakah torch didukung
-          var capabilities = track.getCapabilities ? track.getCapabilities() : {};
-          if (capabilities.torch) {
-            document.getElementById('btnTorch').style.display = 'block';
-          }
-
           video.onloadedmetadata = function() {
             video.play();
             scanning = true;
-            updateStatus('Arahkan kamera ke QR Code (bisa di ruangan gelap)', '#38bdf8');
+            updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
             requestAnimationFrame(tick);
           };
         })
         .catch(function(err) {
-          // Fallback constraint sederhana jika advanced gagal
-          navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
-            .then(function(stream) {
-              currentStream = stream;
-              video.srcObject = stream;
-              track = stream.getVideoTracks()[0];
-              video.onloadedmetadata = function() {
-                video.play();
-                scanning = true;
-                updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
-                requestAnimationFrame(tick);
-              };
-            })
-            .catch(function(err2) {
-              updateStatus('Gagal membuka kamera: ' + describeCameraError(err2), '#ef4444', true);
-            });
+          updateStatus('Gagal membuka kamera: ' + describeCameraError(err), '#ef4444', true);
         });
-    }
-
-    function toggleTorch() {
-      if (!track) return;
-      torchOn = !torchOn;
-      track.applyConstraints({
-        advanced: [{ torch: torchOn }]
-      }).then(function() {
-        var btn = document.getElementById('btnTorch');
-        if (torchOn) {
-          btn.textContent = '🔦 Matikan Senter';
-          btn.classList.add('active');
-        } else {
-          btn.textContent = '🔦 Nyalakan Senter';
-          btn.classList.remove('active');
-        }
-      }).catch(function(e) {
-        console.warn('Torch tidak didukung:', e);
-        updateStatus('Senter tidak didukung di perangkat ini', '#f59e0b');
-      });
     }
 
     function tick() {
@@ -358,17 +252,8 @@
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
         var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-        // ===== Enhance untuk kondisi gelap =====
-        enhanceImageData(imageData);
-
-        // Coba baca dengan inversionAttempts attemptBoth (lebih tangguh)
-        var code = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: 'attemptBoth'
-        });
-
+        var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
         if (code && code.data) {
           onScanSuccess(code.data);
           return;
@@ -387,6 +272,7 @@
         tglExp: ''
       };
 
+      // Format baru
       if (/KATEGORI\s*:/i.test(text) || /NAMA\s*BARANG\s*:/i.test(text)) {
         var lines = text.split(/\r?\n/);
         for (var i = 0; i < lines.length; i++) {
@@ -408,6 +294,7 @@
         return result;
       }
 
+      // Format lama (pipe)
       if (text.indexOf('|') !== -1) {
         var parts = text.split('|');
         result.nama     = (parts[0] || '').trim();
@@ -429,6 +316,7 @@
         return;
       }
 
+      // ===== PUTAR BEEP SAAT BERHASIL =====
       playBeep();
 
       scannedData = {
@@ -446,14 +334,9 @@
       resultBox.classList.add('show');
       updateStatus('QR berhasil dibaca! Isi jumlah & tujuan lalu konfirmasi.', '#22c55e');
 
+      // Getar juga (jika HP mendukung)
       if (navigator.vibrate) {
         try { navigator.vibrate(150); } catch (e) {}
-      }
-
-      // Matikan torch jika sedang menyala
-      if (torchOn && track) {
-        track.applyConstraints({ advanced: [{ torch: false }] }).catch(function(){});
-        torchOn = false;
       }
 
       stopCamera();
@@ -465,7 +348,6 @@
         currentStream.getTracks().forEach(function(t) { t.stop(); });
         currentStream = null;
       }
-      track = null;
     }
 
     function scanUlang() {
@@ -474,10 +356,6 @@
       var btn = document.getElementById('btnConfirm');
       btn.disabled = false;
       btn.textContent = 'Konfirmasi & Catat Keluar';
-      document.getElementById('btnTorch').style.display = 'none';
-      document.getElementById('btnTorch').textContent = '🔦 Nyalakan Senter';
-      document.getElementById('btnTorch').classList.remove('active');
-      torchOn = false;
       startCamera();
     }
 
