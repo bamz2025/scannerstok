@@ -158,6 +158,39 @@
     var currentStream = null;
     var scannedData = null;
 
+    // ================= SUARA BEEP (PC & Android) =================
+    var audioCtx = null;
+
+    function playBeep() {
+      try {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        // Resume jika suspended (kebijakan browser mobile)
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume();
+        }
+
+        var oscillator = audioCtx.createOscillator();
+        var gainNode = audioCtx.createGain();
+
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        // Nada beep yang jelas
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+        gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+
+        oscillator.start(audioCtx.currentTime);
+        oscillator.stop(audioCtx.currentTime + 0.25);
+      } catch (e) {
+        // Fallback diam jika audio tidak didukung
+        console.warn('Beep tidak bisa diputar:', e);
+      }
+    }
+
     function updateStatus(msg, color, isError) {
       statusEl.textContent = msg;
       statusEl.style.background = color + '22';
@@ -229,7 +262,7 @@
       requestAnimationFrame(tick);
     }
 
-    // ================= PARSER QR (disinkronkan dengan format label baru) =================
+    // ================= PARSER QR =================
     function parseQrData(decodedText) {
       var text = (decodedText || '').trim();
       var result = {
@@ -239,11 +272,7 @@
         tglExp: ''
       };
 
-      // Format baru (multi-line):
-      // KATEGORI: ...
-      // NAMA BARANG: ...
-      // TANGGAL MASUK: ...
-      // TANGGAL EXPIRED: ...
+      // Format baru
       if (/KATEGORI\s*:/i.test(text) || /NAMA\s*BARANG\s*:/i.test(text)) {
         var lines = text.split(/\r?\n/);
         for (var i = 0; i < lines.length; i++) {
@@ -265,7 +294,7 @@
         return result;
       }
 
-      // Format lama (pipe): Nama|Kategori|TglMasuk|TglExp  (masih didukung)
+      // Format lama (pipe)
       if (text.indexOf('|') !== -1) {
         var parts = text.split('|');
         result.nama     = (parts[0] || '').trim();
@@ -275,7 +304,6 @@
         return result;
       }
 
-      // Tidak dikenali
       return null;
     }
 
@@ -287,6 +315,9 @@
         requestAnimationFrame(tick);
         return;
       }
+
+      // ===== PUTAR BEEP SAAT BERHASIL =====
+      playBeep();
 
       scannedData = {
         nama: parsed.nama || '-',
@@ -302,7 +333,12 @@
 
       resultBox.classList.add('show');
       updateStatus('QR berhasil dibaca! Isi jumlah & tujuan lalu konfirmasi.', '#22c55e');
-      if (navigator.vibrate) { try { navigator.vibrate(150); } catch (e) {} }
+
+      // Getar juga (jika HP mendukung)
+      if (navigator.vibrate) {
+        try { navigator.vibrate(150); } catch (e) {}
+      }
+
       stopCamera();
     }
 
@@ -340,7 +376,6 @@
       btn.textContent = 'Menyimpan...';
       updateStatus('Mengirim data ke server...', '#3b82f6');
 
-      // Payload tetap sama → logika pengurangan stok tidak berubah
       var payload = {
         nama: scannedData.nama,
         kategori: scannedData.kategori,
@@ -357,9 +392,7 @@
           setTimeout(function() { window.close(); }, 800);
           return;
         }
-      } catch (e) {
-        // window.opener bisa null/terblokir
-      }
+      } catch (e) {}
 
       updateStatus('Buka dari menu Barang Keluar agar data otomatis tersimpan.', '#f59e0b');
       btn.disabled = false;
