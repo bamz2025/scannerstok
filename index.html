@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
-  <title>Scan QR Barang Keluar</title>
+  <title>Scan QR Barang Keluar - Precision Ultra</title>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -45,6 +45,21 @@
       border: 3px solid #22c55e;
       border-radius: 12px;
       pointer-events: none;
+      box-shadow: inset 0 0 15px rgba(34, 197, 94, 0.3);
+    }
+    .scan-line {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: #22c55e;
+      box-shadow: 0 0 10px #22c55e, 0 0 20px #22c55e;
+      animation: moveScan 2s infinite linear;
+      pointer-events: none;
+    }
+    @keyframes moveScan {
+      0% { top: 5%; }
+      50% { top: 95%; }
+      100% { top: 5%; }
     }
     .result-box {
       margin-top: 16px;
@@ -113,13 +128,15 @@
   <div class="container">
     <div class="header">
       <h1>Scan QR Barang Keluar</h1>
-      <p>Arahkan kamera ke QR Code label barang</p>
+      <p>Pindai Presisi Tinggi (Lengkung, Gelap &amp; Glare)</p>
     </div>
     <div class="content">
       <div id="wrap">
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" style="display:none"></canvas>
-        <div id="overlay"></div>
+        <div id="overlay">
+          <div class="scan-line"></div>
+        </div>
       </div>
 
       <!-- Tombol Senter -->
@@ -154,6 +171,7 @@
       <button class="btn btn-close" onclick="window.close()">Tutup</button>
     </div>
   </div>
+
   <script>
     var video = document.getElementById('video');
     var canvas = document.getElementById('canvas');
@@ -165,15 +183,7 @@
     var scannedData = null;
     var torchOn = false;
     var track = null;
-
-    // Control FPS & Performa Scan
-    var lastScanTime = 0;
-    var SCAN_INTERVAL = 80; // Minimal interval scan per frame (~12 FPS agar tidak hang)
-    var MAX_PROCESSING_WIDTH = 480; // Resize frame ke ukuran ringan untuk processing
-
-    // Canvas Cadangan untuk Pemrosesan Ringan
-    var procCanvas = document.createElement('canvas');
-    var procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+    var processPass = 0;
 
     // ================= SUARA BEEP =================
     var audioCtx = null;
@@ -221,31 +231,109 @@
       return msg;
     }
 
-    // ================= RINGAN & RINGKAS PREPROCESSING =================
-    
-    // Algoritma Ringan: Meningkatkan kontras & gelap tanpa membuat loop berlebih
-    function enhanceFast(imgData) {
-      var data = imgData.data;
+    // ================= ALGORITMA ADVANCED OPTIK & CITRA =================
+
+    // 1. DUAL LOW-LIGHT ENHANCER & ANTI-GLARE CONTRAST STRETCHING
+    function enhanceLowLightAndGlare(imageData) {
+      var data = imageData.data;
       var len = data.length;
       
-      // Ambil sampel rata-rata terang gambar
-      var sum = 0;
-      for (var i = 0; i < len; i += 32) {
-        sum += (data[i] + data[i+1] + data[i+2]) / 3;
-      }
-      var avg = sum / (len / 32);
+      // Ambil min dan max luma untuk dynamic stretching
+      var minLuma = 255, maxLuma = 0;
+      var gray = new Uint8Array(len / 4);
 
-      // Jika gambar gelap atau terlalu banyak glare, tingkatkan kontras secara cepat
-      var isDark = avg < 80;
-      var factor = isDark ? 1.5 : 1.2;
-
-      for (var i = 0; i < len; i += 4) {
-        var g = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
-        if (isDark) g += 30; // Boost kecerahan gelap
-        g = ((g - 128) * factor) + 128; // Dynamic contrast
-        data[i] = data[i+1] = data[i+2] = g < 0 ? 0 : (g > 255 ? 255 : g);
+      for (var i = 0, j = 0; i < len; i += 4, j++) {
+        var r = data[i], g = data[i+1], b = data[i+2];
+        // Perhitungan Luminance standar ISO
+        var luma = (0.299 * r + 0.587 * g + 0.114 * b);
+        gray[j] = luma;
+        if (luma < minLuma) minLuma = luma;
+        if (luma > maxLuma) maxLuma = luma;
       }
-      return imgData;
+
+      var range = maxLuma - minLuma;
+      if (range === 0) range = 1;
+
+      for (var k = 0, idx = 0; k < len; k += 4, idx++) {
+        var val = gray[idx];
+        
+        // Anti-Glare Suppression: Jika ada piksel melampaui batas saturasi akibat kilau
+        if (val > 220) {
+          // Kurangi intensitas ekstrem agar pola QR tidak terhapus putih totally
+          val = 180 + (val - 220) * 0.2;
+        }
+
+        // Adaptive Gamma Adjustment (Kondisional: Jika Sangat Gelap)
+        if (maxLuma < 100) { 
+          // Boost pencahayaan ekstrem (Gamma 0.35)
+          val = Math.pow(val / 255, 0.35) * 255;
+        } else {
+          // Stretch Contrast Normal
+          val = ((val - minLuma) / range) * 255;
+        }
+
+        data[k] = data[k+1] = data[k+2] = val;
+      }
+      return imageData;
+    }
+
+    // 2. INTEGRAL IMAGE ADAPTIVE THRESHOLDING (Sangat Ampuh Untuk Bayangan & Glare)
+    function applyIntegralAdaptiveThreshold(imageData) {
+      var data = imageData.data;
+      var width = imageData.width;
+      var height = imageData.height;
+      var S = Math.floor(width / 8); // Window size
+      var T = 0.15; // Threshold offset (15%)
+
+      var integral = new Uint32Array(width * height);
+      var gray = new Uint8Array(width * height);
+
+      // Konversi Grayscale & Hitung Integral Image O(1)
+      for (var y = 0; y < height; y++) {
+        var sum = 0;
+        for (var x = 0; x < width; x++) {
+          var index = y * width + x;
+          var r = data[index * 4];
+          var g = data[index * 4 + 1];
+          var b = data[index * 4 + 2];
+          var gVal = (r * 299 + g * 587 + b * 114) / 1000;
+          gray[index] = gVal;
+
+          sum += gVal;
+          if (y === 0) {
+            integral[index] = sum;
+          } else {
+            integral[index] = integral[(y - 1) * width + x] + sum;
+          }
+        }
+      }
+
+      // Adaptive Binarization berbasis Integral Image
+      var s2 = Math.floor(S / 2);
+      for (var x = 0; x < width; x++) {
+        for (var y = 0; y < height; y++) {
+          var x1 = Math.max(x - s2, 0);
+          var x2 = Math.min(x + s2, width - 1);
+          var y1 = Math.max(y - s2, 0);
+          var y2 = Math.min(y + s2, height - 1);
+
+          var count = (x2 - x1) * (y2 - y1);
+          var sum = integral[y2 * width + x2] - 
+                    integral[y1 * width + x2] - 
+                    integral[y2 * width + x1] + 
+                    integral[y1 * width + x1];
+
+          var idx = y * width + x;
+          var pixelValue = gray[idx];
+
+          // Jika nilai piksel < rata-rata area sekitar - 15%, jadikan HITAM, selain itu PUTIH
+          var binaryVal = (pixelValue * count) < (sum * (1.0 - T)) ? 0 : 255;
+          
+          var pIdx = idx * 4;
+          data[pIdx] = data[pIdx + 1] = data[pIdx + 2] = binaryVal;
+        }
+      }
+      return imageData;
     }
 
     // ================= KAMERA =================
@@ -272,11 +360,13 @@
       var constraints = {
         video: {
           facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { min: 640, ideal: 1280, max: 1920 },
+          height: { min: 480, ideal: 720, max: 1080 },
           advanced: [
             { focusMode: 'continuous' },
-            { exposureMode: 'continuous' }
+            { exposureMode: 'continuous' },
+            { whiteBalanceMode: 'continuous' },
+            { iso: { max: 1600 } } // Paksa sensor membuka sensitivitas di tempat gelap
           ]
         },
         audio: false
@@ -296,7 +386,7 @@
           video.onloadedmetadata = function() {
             video.play();
             scanning = true;
-            updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
+            updateStatus('Siap memindai (Presisi: Lengkung, Gelap & Glare)', '#38bdf8');
             requestAnimationFrame(tick);
           };
         })
@@ -339,45 +429,54 @@
       });
     }
 
-    // ================= LOOP DETEKSI TER-OPTIMASI (ANTI-HANG) =================
-    function tick(now) {
+    // ================= LOOPING PEMINDAIAN ADVANCED PIPELINE =================
+    function tick() {
       if (!scanning) return;
 
-      // Throttle agar CPU HP tidak panas & hang
-      if (now - lastScanTime >= SCAN_INTERVAL) {
-        lastScanTime = now;
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
 
-        if (video.readyState === video.HAVE_ENOUGH_DATA) {
-          var vw = video.videoWidth;
-          var vh = video.videoHeight;
+        processPass = (processPass + 1) % 3;
 
-          // Downscale dimensi agar pengolahan ringan (efektif untuk botol cembung & glare)
-          var scale = Math.min(1, MAX_PROCESSING_WIDTH / vw);
-          var pw = Math.floor(vw * scale);
-          var ph = Math.floor(vh * scale);
+        var cropX = 0, cropY = 0, cropW = canvas.width, cropH = canvas.height;
 
-          procCanvas.width = pw;
-          procCanvas.height = ph;
-          procCtx.drawImage(video, 0, 0, pw, ph);
+        // Mode 2: Center-Focus Crop untuk menangani Distorsi Lengkungan Permukaan (Botol/Tabung)
+        if (processPass === 2) {
+          cropW = Math.floor(canvas.width * 0.65);
+          cropH = Math.floor(canvas.height * 0.65);
+          cropX = Math.floor((canvas.width - cropW) / 2);
+          cropY = Math.floor((canvas.height - cropH) / 2);
+        }
 
-          var imgData = procCtx.getImageData(0, 0, pw, ph);
+        ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, canvas.width, canvas.height);
+        var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-          // PASS 1: Scan Frame Ter-scale Ringan (Sangat cepat & ampuh untuk permukaan botol)
-          var code = jsQR(imgData.data, pw, ph, { inversionAttempts: 'attemptBoth' });
+        // PIPELINE EVALUASI FRAME
+        if (processPass === 0) {
+          // Pass 0: Standard Frame Raw Scan
+          var code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: 'attemptBoth'
+          });
+          if (code && code.data) { onScanSuccess(code.data); return; }
 
-          // PASS 2: Jika belum ketemu, terapkan enhancement kontras cepat (Atasi gelap & glare)
-          if (!code) {
-            var enhancedData = enhanceFast(imgData);
-            code = jsQR(enhancedData.data, pw, ph, { inversionAttempts: 'dontInvert' });
-          }
+        } else if (processPass === 1) {
+          // Pass 1: Low Light & Anti Glare Dynamic Contrast Enhancement
+          imageData = enhanceLowLightAndGlare(imageData);
+          var code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: 'attemptBoth'
+          });
+          if (code && code.data) { onScanSuccess(code.data); return; }
 
-          if (code && code.data) {
-            onScanSuccess(code.data);
-            return;
-          }
+        } else if (processPass === 2) {
+          // Pass 2: High-Density Integral Adaptive Thresholding (Untuk Bayangan & Pantulan Parah)
+          imageData = applyIntegralAdaptiveThreshold(imageData);
+          var code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: 'dontInvert'
+          });
+          if (code && code.data) { onScanSuccess(code.data); return; }
         }
       }
-      
       requestAnimationFrame(tick);
     }
 
