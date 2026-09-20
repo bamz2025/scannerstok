@@ -46,45 +46,6 @@
       border-radius: 12px;
       pointer-events: none;
     }
-    #camControls {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      display: flex;
-      gap: 8px;
-      z-index: 5;
-    }
-    .cam-btn {
-      pointer-events: auto;
-      width: 42px;
-      height: 42px;
-      border-radius: 50%;
-      border: none;
-      background: rgba(15,23,42,0.7);
-      color: #e2e8f0;
-      font-size: 1.1rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      backdrop-filter: blur(2px);
-    }
-    .cam-btn.active {
-      background: #facc15;
-      color: #1e293b;
-    }
-    .scan-hint {
-      position: absolute;
-      bottom: 10px;
-      left: 0;
-      right: 0;
-      text-align: center;
-      font-size: 0.75rem;
-      color: #cbd5e1;
-      background: rgba(15,23,42,0.55);
-      padding: 4px 0;
-      pointer-events: none;
-    }
     .result-box {
       margin-top: 16px;
       padding: 14px;
@@ -157,10 +118,6 @@
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" style="display:none"></canvas>
         <div id="overlay"></div>
-        <div id="camControls">
-          <button type="button" class="cam-btn" id="btnTorch" onclick="toggleTorch()" title="Senter" style="display:none">💡</button>
-        </div>
-        <div class="scan-hint" id="scanHint">Tempel rata jika bisa &middot; tap layar untuk fokus &middot; nyalakan senter jika gelap</div>
       </div>
       <div class="result-box" id="resultBox">
         <div class="result-row"><span class="label">Nama Barang</span><span class="value" id="resNama">-</span></div>
@@ -195,19 +152,15 @@
     var video = document.getElementById('video');
     var canvas = document.getElementById('canvas');
     var ctx = canvas.getContext('2d', { willReadFrequently: true });
-    // Canvas kerja terpisah untuk crop/zoom & enhancement, supaya tidak mengganggu canvas utama
-    var workCanvas = document.createElement('canvas');
-    var workCtx = workCanvas.getContext('2d', { willReadFrequently: true });
     var statusEl = document.getElementById('status');
     var resultBox = document.getElementById('resultBox');
     var scanning = true;
     var currentStream = null;
-    var currentTrack = null;
     var scannedData = null;
-    var torchOn = false;
-    var frameCounter = 0;
+
     // ================= SUARA BEEP (PC & Android) =================
     var audioCtx = null;
+
     function playBeep() {
       try {
         if (!audioCtx) {
@@ -217,15 +170,19 @@
         if (audioCtx.state === 'suspended') {
           audioCtx.resume();
         }
+
         var oscillator = audioCtx.createOscillator();
         var gainNode = audioCtx.createGain();
+
         oscillator.connect(gainNode);
         gainNode.connect(audioCtx.destination);
+
         // Nada beep yang jelas
         oscillator.type = 'sine';
         oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
         gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
         gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+
         oscillator.start(audioCtx.currentTime);
         oscillator.stop(audioCtx.currentTime + 0.25);
       } catch (e) {
@@ -233,12 +190,14 @@
         console.warn('Beep tidak bisa diputar:', e);
       }
     }
+
     function updateStatus(msg, color, isError) {
       statusEl.textContent = msg;
       statusEl.style.background = color + '22';
       statusEl.style.color = color;
       statusEl.classList.toggle('err', !!isError);
     }
+
     function describeCameraError(err) {
       var msg = (err && (err.message || err.name)) || String(err);
       if (/NotAllowedError|Permission/i.test(msg)) {
@@ -252,63 +211,7 @@
       }
       return msg;
     }
-    // ================= KONTROL KAMERA: FOKUS, ZOOM, SENTER =================
-    function applyAdvancedTrackSettings(track) {
-      try {
-        var caps = track.getCapabilities ? track.getCapabilities() : {};
-        var advanced = [];
-        // Autofokus kontinu membantu saat QR ada di permukaan melengkung (jarak berubah-ubah)
-        if (caps.focusMode && caps.focusMode.indexOf('continuous') !== -1) {
-          advanced.push({ focusMode: 'continuous' });
-        }
-        // Exposure otomatis membantu di ruangan gelap/kurang terang
-        if (caps.exposureMode && caps.exposureMode.indexOf('continuous') !== -1) {
-          advanced.push({ exposureMode: 'continuous' });
-        }
-        if (caps.whiteBalanceMode && caps.whiteBalanceMode.indexOf('continuous') !== -1) {
-          advanced.push({ whiteBalanceMode: 'continuous' });
-        }
-        if (advanced.length) {
-          track.applyConstraints({ advanced: advanced }).catch(function(){});
-        }
-        // Tombol senter hanya ditampilkan jika perangkat mendukung
-        var btnTorch = document.getElementById('btnTorch');
-        if (caps.torch) {
-          btnTorch.style.display = 'flex';
-        } else {
-          btnTorch.style.display = 'none';
-        }
-      } catch (e) {
-        // Diam jika capabilities tidak didukung browser
-      }
-    }
-    function toggleTorch() {
-      if (!currentTrack) return;
-      torchOn = !torchOn;
-      currentTrack.applyConstraints({ advanced: [{ torch: torchOn }] })
-        .then(function() {
-          document.getElementById('btnTorch').classList.toggle('active', torchOn);
-        })
-        .catch(function() {
-          torchOn = !torchOn; // gagal, batalkan state
-          updateStatus('Senter tidak didukung di perangkat ini', '#f59e0b');
-        });
-    }
-    // Tap untuk fokus ulang ke titik yang disentuh (jika didukung)
-    document.getElementById('wrap').addEventListener('click', function(e) {
-      if (!currentTrack || !currentTrack.getCapabilities) return;
-      try {
-        var caps = currentTrack.getCapabilities();
-        if (caps.pointsOfInterest) {
-          var rect = e.currentTarget.getBoundingClientRect();
-          var x = (e.clientX - rect.left) / rect.width;
-          var y = (e.clientY - rect.top) / rect.height;
-          currentTrack.applyConstraints({ advanced: [{ pointsOfInterest: [{ x: x, y: y }] }] }).catch(function(){});
-        } else if (caps.focusMode && caps.focusMode.indexOf('single-shot') !== -1) {
-          currentTrack.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] }).catch(function(){});
-        }
-      } catch (err) {}
-    });
+
     function startCamera() {
       var isSecure = window.isSecureContext ||
         location.protocol === 'https:' ||
@@ -327,26 +230,9 @@
         return;
       }
       updateStatus('Meminta izin kamera...', '#3b82f6');
-      // Resolusi tinggi + autofocus/exposure kontinu: penting untuk QR di permukaan
-      // melengkung (botol) dan kondisi cahaya kurang terang.
-      var constraints = {
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1920 },
-          advanced: [{ focusMode: 'continuous' }]
-        },
-        audio: false
-      };
-      navigator.mediaDevices.getUserMedia(constraints)
-        .catch(function() {
-          // Fallback jika constraint advanced/resolusi tinggi ditolak perangkat
-          return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-        })
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
         .then(function(stream) {
           currentStream = stream;
-          currentTrack = stream.getVideoTracks()[0];
-          applyAdvancedTrackSettings(currentTrack);
           video.srcObject = stream;
           video.onloadedmetadata = function() {
             video.play();
@@ -359,77 +245,23 @@
           updateStatus('Gagal membuka kamera: ' + describeCameraError(err), '#ef4444', true);
         });
     }
-    // ================= PENINGKATAN GAMBAR UNTUK KONDISI SULIT =================
-    // Stretch kontras (mirip histogram stretching) supaya QR tetap terbaca
-    // saat cahaya kurang terang atau ada silau/pantulan di permukaan melengkung.
-    function enhanceContrast(imageData) {
-      var data = imageData.data;
-      var len = data.length;
-      var min = 255, max = 0;
-      // Sampling tiap 4 piksel biar cepat
-      for (var i = 0; i < len; i += 16) {
-        var lum = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
-        if (lum < min) min = lum;
-        if (lum > max) max = lum;
-      }
-      var range = max - min;
-      if (range < 10) return imageData; // kontras sudah cukup rendah risiko, jangan dipaksa
-      var scale = 255 / range;
-      for (var j = 0; j < len; j += 4) {
-        var l = (data[j] * 0.299 + data[j + 1] * 0.587 + data[j + 2] * 0.114);
-        var v = (l - min) * scale;
-        if (v < 0) v = 0; else if (v > 255) v = 255;
-        data[j] = v; data[j + 1] = v; data[j + 2] = v;
-      }
-      return imageData;
-    }
-    function tryDecode(imageData) {
-      var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
-      return code && code.data ? code : null;
-    }
+
     function tick() {
       if (!scanning) return;
       if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        frameCounter++;
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        // 1) Coba baca frame penuh apa adanya (kasus normal, cukup cepat)
-        var full = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        var code = tryDecode(full);
-        // 2) Jika gagal, coba crop tengah (zoom) - membantu saat QR kecil/miring
-        //    karena posisinya di sisi botol yang melengkung.
-        if (!code) {
-          var cw = canvas.width, ch = canvas.height;
-          var cropW = Math.round(cw * 0.6);
-          var cropH = Math.round(ch * 0.6);
-          var cropX = Math.round((cw - cropW) / 2);
-          var cropY = Math.round((ch - cropH) / 2);
-          workCanvas.width = cropW;
-          workCanvas.height = cropH;
-          workCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-          var cropped = workCtx.getImageData(0, 0, cropW, cropH);
-          code = tryDecode(cropped);
-          // 3) Jika masih gagal, tingkatkan kontras crop tengah tsb - membantu
-          //    saat pencahayaan ruangan gelap/kurang terang.
-          if (!code) {
-            var enhancedCrop = enhanceContrast(cropped);
-            code = tryDecode(enhancedCrop);
-          }
-        }
-        // 4) Sesekali (tiap beberapa frame) coba juga versi kontras dari frame
-        //    penuh, untuk kasus label besar yang tetap gelap/silau.
-        if (!code && frameCounter % 3 === 0) {
-          var enhancedFull = enhanceContrast(full);
-          code = tryDecode(enhancedFull);
-        }
-        if (code) {
+        var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+        if (code && code.data) {
           onScanSuccess(code.data);
           return;
         }
       }
       requestAnimationFrame(tick);
     }
+
     // ================= PARSER QR =================
     function parseQrData(decodedText) {
       var text = (decodedText || '').trim();
@@ -439,23 +271,29 @@
         tglMasuk: '',
         tglExp: ''
       };
+
       // Format baru
       if (/KATEGORI\s*:/i.test(text) || /NAMA\s*BARANG\s*:/i.test(text)) {
         var lines = text.split(/\r?\n/);
         for (var i = 0; i < lines.length; i++) {
           var line = lines[i].trim();
           if (!line) continue;
+
           var mKat = line.match(/^KATEGORI\s*:\s*(.*)$/i);
           if (mKat) { result.kategori = mKat[1].trim(); continue; }
+
           var mNama = line.match(/^NAMA\s*BARANG\s*:\s*(.*)$/i);
           if (mNama) { result.nama = mNama[1].trim(); continue; }
+
           var mMasuk = line.match(/^TANGGAL\s*MASUK\s*:\s*(.*)$/i);
           if (mMasuk) { result.tglMasuk = mMasuk[1].trim(); continue; }
+
           var mExp = line.match(/^TANGGAL\s*EXPIRED\s*:\s*(.*)$/i);
           if (mExp) { result.tglExp = mExp[1].trim(); continue; }
         }
         return result;
       }
+
       // Format lama (pipe)
       if (text.indexOf('|') !== -1) {
         var parts = text.split('|');
@@ -465,45 +303,53 @@
         result.tglExp   = (parts[3] || '').trim();
         return result;
       }
+
       return null;
     }
+
     function onScanSuccess(decodedText) {
       var parsed = parseQrData(decodedText);
+
       if (!parsed || (!parsed.nama && !parsed.kategori)) {
         updateStatus('Format QR tidak dikenali:\n' + decodedText, '#ef4444', true);
         requestAnimationFrame(tick);
         return;
       }
+
       // ===== PUTAR BEEP SAAT BERHASIL =====
       playBeep();
+
       scannedData = {
         nama: parsed.nama || '-',
         kategori: parsed.kategori || '-',
         tglMasuk: parsed.tglMasuk || '-',
         tglExp: parsed.tglExp || '-'
       };
+
       document.getElementById('resNama').textContent = scannedData.nama;
       document.getElementById('resKategori').textContent = scannedData.kategori;
       document.getElementById('resMasuk').textContent = scannedData.tglMasuk;
       document.getElementById('resExp').textContent = scannedData.tglExp;
+
       resultBox.classList.add('show');
       updateStatus('QR berhasil dibaca! Isi jumlah & tujuan lalu konfirmasi.', '#22c55e');
+
       // Getar juga (jika HP mendukung)
       if (navigator.vibrate) {
         try { navigator.vibrate(150); } catch (e) {}
       }
+
       stopCamera();
     }
+
     function stopCamera() {
       scanning = false;
       if (currentStream) {
         currentStream.getTracks().forEach(function(t) { t.stop(); });
         currentStream = null;
-        currentTrack = null;
       }
-      torchOn = false;
-      document.getElementById('btnTorch').classList.remove('active');
     }
+
     function scanUlang() {
       scannedData = null;
       resultBox.classList.remove('show');
@@ -512,6 +358,7 @@
       btn.textContent = 'Konfirmasi & Catat Keluar';
       startCamera();
     }
+
     function konfirmasiKeluar() {
       if (!scannedData || !scannedData.nama) {
         alert('Belum ada data QR yang discan');
@@ -528,6 +375,7 @@
       btn.disabled = true;
       btn.textContent = 'Menyimpan...';
       updateStatus('Mengirim data ke server...', '#3b82f6');
+
       var payload = {
         nama: scannedData.nama,
         kategori: scannedData.kategori,
@@ -536,6 +384,7 @@
         tujuan: tujuan,
         periode: periode
       };
+
       try {
         if (window.opener && !window.opener.closed) {
           window.opener.postMessage({ type: 'QR_SCAN_RESULT', data: payload }, '*');
@@ -544,6 +393,7 @@
           return;
         }
       } catch (e) {}
+
       updateStatus('Buka dari menu Barang Keluar agar data otomatis tersimpan.', '#f59e0b');
       btn.disabled = false;
       btn.textContent = 'Konfirmasi & Catat Keluar';
@@ -552,6 +402,7 @@
             '\nTujuan: ' + tujuan +
             '\n\nSilakan buka scanner ini dari tombol Scan QR di menu Barang Keluar agar data otomatis tercatat.');
     }
+
     window.addEventListener('beforeunload', stopCamera);
     startCamera();
   </script>
