@@ -205,95 +205,20 @@
       }
 
       updateStatus('Meminta izin kamera...', '#3b82f6');
-
-      // Constraint kamera lebih agresif untuk low-light & fokus
-      var constraints = {
-        audio: false,
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          // Beberapa browser mendukung advanced constraints
-          advanced: [
-            { focusMode: 'continuous' },
-            { exposureMode: 'continuous' },
-            { whiteBalanceMode: 'continuous' }
-          ]
-        }
-      };
-
-      navigator.mediaDevices.getUserMedia(constraints)
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
         .then(function(stream) {
           currentStream = stream;
           video.srcObject = stream;
-          video.setAttribute('playsinline', true);
-          video.setAttribute('muted', true);
-
-          // Coba naikkan brightness/exposure jika track mendukung
-          try {
-            var track = stream.getVideoTracks()[0];
-            var capabilities = track.getCapabilities ? track.getCapabilities() : {};
-            var settings = {};
-            if (capabilities.exposureCompensation) {
-              settings.exposureCompensation = Math.min(capabilities.exposureCompensation.max || 1, 1);
-            }
-            if (capabilities.brightness) {
-              settings.brightness = Math.min(capabilities.brightness.max || 100, 70);
-            }
-            if (Object.keys(settings).length) {
-              track.applyConstraints({ advanced: [settings] }).catch(function(){});
-            }
-          } catch (e) {}
-
           video.onloadedmetadata = function() {
-            video.play().then(function() {
-              scanning = true;
-              updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
-              requestAnimationFrame(tick);
-            }).catch(function() {
-              updateStatus('Gagal memutar video kamera', '#ef4444', true);
-            });
+            video.play();
+            scanning = true;
+            updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
+            requestAnimationFrame(tick);
           };
         })
         .catch(function(err) {
-          // Fallback constraint lebih sederhana jika advanced gagal
-          navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
-            .then(function(stream) {
-              currentStream = stream;
-              video.srcObject = stream;
-              video.onloadedmetadata = function() {
-                video.play();
-                scanning = true;
-                updateStatus('Arahkan kamera ke QR Code', '#38bdf8');
-                requestAnimationFrame(tick);
-              };
-            })
-            .catch(function(err2) {
-              updateStatus('Gagal membuka kamera: ' + describeCameraError(err2 || err), '#ef4444', true);
-            });
+          updateStatus('Gagal membuka kamera: ' + describeCameraError(err), '#ef4444', true);
         });
-    }
-
-    // Pre-processing sederhana untuk meningkatkan kontras (bantu low-light & QR melengkung)
-    function enhanceImageData(imageData) {
-      var data = imageData.data;
-      var len = data.length;
-      // Tingkatkan kontras & brightness ringan
-      var contrast = 1.35;
-      var brightness = 18;
-      for (var i = 0; i < len; i += 4) {
-        var r = data[i];
-        var g = data[i + 1];
-        var b = data[i + 2];
-        // grayscale dulu
-        var gray = 0.299 * r + 0.587 * g + 0.114 * b;
-        // contrast + brightness
-        gray = (gray - 128) * contrast + 128 + brightness;
-        if (gray < 0) gray = 0;
-        if (gray > 255) gray = 255;
-        data[i] = data[i + 1] = data[i + 2] = gray;
-      }
-      return imageData;
     }
 
     function tick() {
@@ -302,109 +227,36 @@
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
         var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-        // Coba scan normal dulu
-        var code = jsQR(imageData.data, imageData.width, imageData.height, {
-          inversionAttempts: 'attemptBoth'   // lebih toleran terhadap warna terbalik / low contrast
-        });
-
-        // Jika gagal, coba versi yang sudah di-enhance (bantu cahaya kurang & QR melengkung)
-        if (!code) {
-          var enhanced = enhanceImageData(ctx.getImageData(0, 0, canvas.width, canvas.height));
-          code = jsQR(enhanced.data, enhanced.width, enhanced.height, {
-            inversionAttempts: 'attemptBoth'
-          });
-        }
-
+        var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
         if (code && code.data) {
           onScanSuccess(code.data);
-          return;
+          return; // berhenti loop, kamera dimatikan di onScanSuccess
         }
       }
       requestAnimationFrame(tick);
     }
 
-    // Parser yang menerima format BARU maupun format LAMA
-    function parseQrText(decodedText) {
-      var text = (decodedText || '').trim();
-      if (!text) return null;
-
-      // === Format BARU (berlabel, multi-line) ===
-      // Contoh:
-      // KATEGORI : ...
-      // NAMA BARANG : ...
-      // TANGGAL MASUK : ...
-      // TANGGAL EXPIRED : ...
-      if (/KATEGORI\s*:/i.test(text) || /NAMA\s*BARANG\s*:/i.test(text)) {
-        var result = {
-          nama: '',
-          kategori: '',
-          tglMasuk: '',
-          tglExp: ''
-        };
-
-        var lines = text.split(/\r?\n/);
-        for (var i = 0; i < lines.length; i++) {
-          var line = lines[i].trim();
-          if (!line) continue;
-
-          var mKat = line.match(/^KATEGORI\s*:\s*(.*)$/i);
-          if (mKat) { result.kategori = mKat[1].trim(); continue; }
-
-          var mNama = line.match(/^NAMA\s*BARANG\s*:\s*(.*)$/i);
-          if (mNama) { result.nama = mNama[1].trim(); continue; }
-
-          var mMasuk = line.match(/^TANGGAL\s*MASUK\s*:\s*(.*)$/i);
-          if (mMasuk) { result.tglMasuk = mMasuk[1].trim(); continue; }
-
-          var mExp = line.match(/^TANGGAL\s*(EXPIRED|EXP|KADALUARSA)\s*:\s*(.*)$/i);
-          if (mExp) { result.tglExp = mExp[2].trim(); continue; }
-        }
-
-        // Minimal harus ada nama atau kategori
-        if (result.nama || result.kategori) {
-          return result;
-        }
-      }
-
-      // === Format LAMA (pipe-separated) ===
-      // Nama|Kategori|TglMasuk|TglExp
-      if (text.indexOf('|') !== -1) {
-        var parts = text.split('|');
-        return {
-          nama: (parts[0] || '').trim(),
-          kategori: (parts[1] || '').trim(),
-          tglMasuk: (parts[2] || '').trim(),
-          tglExp: (parts[3] || '').trim()
-        };
-      }
-
-      // Tidak dikenali
-      return null;
-    }
-
     function onScanSuccess(decodedText) {
-      var parsed = parseQrText(decodedText);
-
-      if (!parsed) {
-        updateStatus('Format QR tidak dikenali:\n' + decodedText, '#ef4444', true);
-        requestAnimationFrame(tick); // lanjut scan
+      // Format QR dari printer: Nama|Kategori|TglMasuk|TglExp
+      var parts = decodedText.split('|');
+      if (parts.length < 2) {
+        updateStatus('Format QR tidak dikenali: ' + decodedText, '#ef4444', true);
+        requestAnimationFrame(tick); // lanjut scan, mungkin salah target
         return;
       }
 
       scannedData = {
-        nama: parsed.nama || '-',
-        kategori: parsed.kategori || '-',
-        tglMasuk: parsed.tglMasuk || '-',
-        tglExp: parsed.tglExp || '-'
+        nama: (parts[0] || '').trim(),
+        kategori: (parts[1] || '').trim(),
+        tglMasuk: (parts[2] || '').trim(),
+        tglExp: (parts[3] || '').trim()
       };
 
-      document.getElementById('resNama').textContent = scannedData.nama;
-      document.getElementById('resKategori').textContent = scannedData.kategori;
-      document.getElementById('resMasuk').textContent = scannedData.tglMasuk;
-      document.getElementById('resExp').textContent = scannedData.tglExp;
+      document.getElementById('resNama').textContent = scannedData.nama || '-';
+      document.getElementById('resKategori').textContent = scannedData.kategori || '-';
+      document.getElementById('resMasuk').textContent = scannedData.tglMasuk || '-';
+      document.getElementById('resExp').textContent = scannedData.tglExp || '-';
       resultBox.classList.add('show');
       updateStatus('QR berhasil dibaca! Isi jumlah & tujuan lalu konfirmasi.', '#22c55e');
 
@@ -467,7 +319,7 @@
           return;
         }
       } catch (e) {
-        // window.opener bisa null/terblokir
+        // window.opener bisa null/terblokir kalau window dibuka dengan 'noopener'
       }
 
       updateStatus('Buka dari menu Barang Keluar agar data otomatis tersimpan.', '#f59e0b');
